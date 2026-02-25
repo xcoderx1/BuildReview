@@ -14,6 +14,19 @@
 [CmdletBinding()]
 param([string]$OutputPath = "$env:USERPROFILE\Desktop")
 
+# Validate output directory exists - fallback chain
+if (-not (Test-Path $OutputPath)) {
+    foreach ($fb in @(
+        [Environment]::GetFolderPath('Desktop'),
+        "$env:USERPROFILE\Desktop",
+        "$env:USERPROFILE\OneDrive\Desktop",
+        "$env:USERPROFILE\Documents",
+        "$env:USERPROFILE",
+        $env:TEMP
+    )) { if ($fb -and (Test-Path $fb)) { $OutputPath = $fb; break } }
+}
+if (-not (Test-Path $OutputPath)) { New-Item -ItemType Directory -Path $OutputPath -Force | Out-Null }
+
 $Script:Results = [System.Collections.ArrayList]::new()
 $Script:StartTime = Get-Date
 $Script:ComputerName = $env:COMPUTERNAME
