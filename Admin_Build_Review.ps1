@@ -1,6 +1,6 @@
 ﻿<#
 .SYNOPSIS
-    Windows 11 Security Build Review - LOW PRIVILEGE (Comprehensive)
+    Windows 11 Security Build Review - ADMIN (Comprehensive)
 .DESCRIPTION
     Complete security assessment covering:
     - All 13 build review task areas (BIOS, FDE, Patching, Services, File System,
@@ -8,17 +8,17 @@
       Network, Logging, System Hardening)
     - Full CIS Windows 11 Enterprise Benchmark v4.0 (L1 + L2)
     - Pentest-grade POC evidence with exploit references
-    NO ADMIN REQUIRED. Graceful fallbacks where elevation needed. Outputs HTML + CSV.
+    REQUIRES ADMINISTRATOR. Outputs HTML + CSV.
 .PARAMETER OutputPath
     Directory for report output. Defaults to Desktop with smart fallback.
 .PARAMETER Level
     CIS benchmark level: 1 (L1 only) or 2 (L1+L2). Default: 2
 .EXAMPLE
-    .\LowPriv_Build_Review.ps1
-    .\LowPriv_Build_Review.ps1 -Level 1 -OutputPath C:\Reports
+    .\Admin_Build_Review.ps1
+    .\Admin_Build_Review.ps1 -Level 1 -OutputPath C:\Reports
 .NOTES
     Author  : Security Build Tool
-    Version : 5.0-LP
+    Version : 5.0
     Date    : 2026-02-26
     License : MIT
 .LINK
@@ -38,8 +38,8 @@ if (-not (Test-Path $OutputPath)) {
 }
 if (-not (Test-Path $OutputPath)) { New-Item -ItemType Directory -Path $OutputPath -Force | Out-Null }
 
-$Script:IsAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]"Administrator")
-if (-not $Script:IsAdmin) { Write-Host "`n  [i] Running as STANDARD USER - some checks will use fallbacks`n" -ForegroundColor Yellow }
+$isAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]"Administrator")
+if (-not $isAdmin) { Write-Host "`n  [!] REQUIRES Administrator. Right-click PowerShell > Run as Administrator`n" -ForegroundColor Red; exit }
 
 $Script:Results = [System.Collections.ArrayList]::new()
 $Script:StartTime = Get-Date
@@ -142,21 +142,6 @@ function Test-BIOS {
 function Test-FDE {
     WS "2. Full Disk Encryption"
     try{
-        $vols=$null;try{$vols=Get-BitLockerVolume -EA Stop}catch{}
-        if(-not $vols){try{$bde=manage-bde -status C: 2>$null
-            $blSt=if($bde -match "Protection Status:\s+(.+)"){$Matches[1].Trim()}else{"Unknown"}
-            $blMt=if($bde -match "Encryption Method:\s+(.+)"){$Matches[1].Trim()}else{"Unknown"}
-            Add-Result -Cat "2. Full Disk Encryption" -Check "BitLocker C: (manage-bde)" `
-                -Status $(if($blSt -match "On"){"Pass"}else{"Fail"}) -Exp "Protection On" `
-                -Act "$blSt ($blMt)" -Sev "High" -POC ($bde|Out-String).Trim()
-            return}catch{}}
-        if(-not $vols){try{$ev=Get-CimInstance -Namespace root/CIMV2/Security/MicrosoftVolumeEncryption -ClassName Win32_EncryptableVolume -EA Stop|Where-Object DriveLetter -eq "C:"
-            $blSt2=if($ev.ProtectionStatus -eq 1){"On"}else{"Off"}
-            Add-Result -Cat "2. Full Disk Encryption" -Check "BitLocker C: (WMI)" `
-                -Status $(if($blSt2 -eq "On"){"Pass"}else{"Fail"}) -Exp "On" -Act $blSt2 -Sev "High"
-            return}catch{}}
-        if(-not $vols){Add-Result -Cat "2. Full Disk Encryption" -Check "BitLocker" -Status "Info" `
-            -Act "Cannot query (standard user). Run admin version." -Sev "High";return}
         $vols=Get-BitLockerVolume -EA Stop
         foreach($vol in $vols){
             $isOS=$vol.MountPoint -eq "C:";$keys=($vol.KeyProtector|ForEach-Object{$_.KeyProtectorType})-join ", "
@@ -470,20 +455,8 @@ function Test-AccountConfig {
     WS "8. User Account & Password Config + CIS 1.x/2.x"
 
     # secedit
-    $tmpI=Join-Path $env:TEMP "$Script:Tag.inf";$null=secedit /export /cfg $tmpI /areas SECURITYPOLICY 2>&1
+    $tmpI=Join-Path $env:TEMP "$Script:Tag.inf";secedit /export /cfg $tmpI /areas SECURITYPOLICY 2>&1|Out-Null
     $sp=if((Test-Path $tmpI) -and (Get-Item $tmpI).Length -gt 100){Get-Content $tmpI}else{@()};Remove-Item $tmpI -Force -EA SilentlyContinue
-    # Low-priv: secedit may fail, use net accounts as fallback
-    if($sp.Count -eq 0){try{$na=net accounts 2>$null;if($na -and ($na -join "") -match "password"){
-        $naPoc=($na|Out-String).Trim()
-        $ml2=if($na -match "Minimum password length:\s+(\d+)"){[int]$Matches[1]}else{0}
-        $lt2=if($na -match "Lockout threshold:\s+(\S+)"){$Matches[1]}else{"Unknown"}
-        $ld2=if($na -match "Lockout duration.*?:\s+(\S+)"){$Matches[1]}else{"Unknown"}
-        $hi2=if($na -match "Length of password history.*?:\s+(\S+)"){$Matches[1]}else{"Unknown"}
-        Add-Result -Cat "8. Account Config" -Check "Min password length" -CIS "1.1.4" -Status $(if($ml2 -ge 14){"Pass"}elseif($ml2 -ge 8){"Warning"}else{"Fail"}) -Exp "14" -Act "$ml2 chars" -Sev "High" -POC $naPoc
-        Add-Result -Cat "8. Account Config" -Check "Lockout threshold" -CIS "1.2.2" -Status $(if($lt2 -match "^\d+$" -and [int]$lt2 -ge 1 -and [int]$lt2 -le 5){"Pass"}else{"Fail"}) -Exp "1-5" -Act $(if($lt2 -eq "Never"){"Never (0)"}else{$lt2}) -Sev "High"
-        Add-Result -Cat "8. Account Config" -Check "Lockout duration" -CIS "1.2.1" -Status $(if($ld2 -match "^\d+$" -and [int]$ld2 -ge 15){"Pass"}else{"Fail"}) -Exp "15+ min" -Act "$ld2 min" -Sev "High"
-        Add-Result -Cat "8. Account Config" -Check "Password history" -CIS "1.1.1" -Status $(if($hi2 -match "^\d+$" -and [int]$hi2 -ge 24){"Pass"}else{"Fail"}) -Exp "24+" -Act $hi2
-    }}catch{}}
     function GSP{param([string]$K);$m=$sp|Select-String "$K\s*=\s*(.+)"|Select-Object -First 1;if($m){$m.Matches[0].Groups[1].Value.Trim()}else{$null}}
 
     if($sp.Count -gt 0){
@@ -696,8 +669,7 @@ function Test-Network {
 #region 12. Logging & Auditing + CIS 17.x
 function Test-Logging {
     WS "12. Logging & Auditing + CIS 17.x"
-    $ap=$null;try{$ap=auditpol /get /category:* 2>$null;if(-not $ap -or ($ap -join "") -notmatch "Logon"){$ap=$null}}catch{}
-    if(-not $ap){Add-Result -Cat "12. Logging" -Check "Audit policy" -Status "Info" -Act "Cannot query auditpol (standard user). Run admin version." -Sev "High";return}
+    $ap=auditpol /get /category:* 2>$null
     $checks=@(
         @{ID="17.1.1";S="Credential Validation";E="Success and Failure"},@{ID="17.2.1";S="Application Group Management";E="Success and Failure"},
         @{ID="17.2.5";S="Security Group Management";E="Success"},@{ID="17.2.6";S="User Account Management";E="Success and Failure"},
@@ -747,7 +719,7 @@ function Test-Hardening {
     Add-Result -Cat "13. System Hardening" -Check "WSL" -Status $(if($wsl){"Warning"}else{"Pass"}) -Act $(if($wsl){"Installed"}else{"No"}) -Sev "Medium" -Exploit "WSL bypasses AppLocker/AMSI"
     try{$ci=Get-ChildItem "C:\Windows\System32\CodeIntegrity\CiPolicies\Active" -EA SilentlyContinue
         Add-Result -Cat "13. System Hardening" -Check "WDAC" -Status $(if($ci -and $ci.Count -gt 0){"Pass"}else{"Warning"}) -Act $(if($ci){"Deployed"}else{"Not deployed"}) -Sev "Medium"}catch{}
-    try{$bits=@(Get-BitsTransfer -EA SilentlyContinue|Where-Object{$_.JobState -ne "Transferred"})
+    try{$bits=@(Get-BitsTransfer -AllUsers -EA SilentlyContinue|Where-Object{$_.JobState -ne "Transferred"})
         Add-Result -Cat "13. System Hardening" -Check "BITS jobs" -Status $(if($bits.Count -eq 0){"Pass"}else{"Warning"}) -Act "$($bits.Count) active" -Sev "Medium"}catch{}
     $crf=@();foreach($d in @("$env:USERPROFILE","C:\Users\Public","C:\ProgramData")){if(Test-Path $d){try{Get-ChildItem $d -Recurse -File -EA SilentlyContinue -Depth 3|Where-Object{$_.Name -match "(password|cred|secret|\.rdp|\.vnc|web\.config)" -and $_.Length -lt 1MB}|Select-Object -First 10|ForEach-Object{try{$c=Get-Content $_.FullName -TotalCount 50 -EA Stop;if(($c -join "`n") -match '(?i)(password|passwd|pwd|credential)\s*[:=]'){$crf+=$_.FullName}}catch{}}}catch{}}}
     Add-Result -Cat "13. System Hardening" -Check "Cleartext credential files" -Status $(if($crf.Count -eq 0){"Pass"}else{"Fail"}) -Exp "None" -Act $(if($crf.Count -eq 0){"None"}else{($crf|Select-Object -First 3)-join '; '}) -Sev "High"
@@ -785,7 +757,7 @@ function Build-Report {
     $w=($Script:Results|Where-Object Status -eq "Warning").Count;$poc=($Script:Results|Where-Object{$_.POC -ne ""}).Count
     $comp=if(($p+$f) -gt 0){[math]::Round(($p/($p+$f))*100,1)}else{0};$compC=if($comp -ge 80){"#4ade80"}elseif($comp -ge 60){"#fbbf24"}else{"#f87171"}
     $cats=$Script:Results|Group-Object Category|Sort-Object Name;$ts=Get-Date -Format "yyyy-MM-dd_HHmmss"
-    $rp=Join-Path $OutputPath "LowPriv_Build_Review_${Script:CN}_$ts.html"
+    $rp=Join-Path $OutputPath "Admin_Build_Review_${Script:CN}_$ts.html"
 
     $html=@"
 <!DOCTYPE html>
@@ -793,8 +765,8 @@ function Build-Report {
 <title>Build Review - $Script:CN</title>
 <style>
 *{margin:0;padding:0;box-sizing:border-box}body{font-family:'Segoe UI',sans-serif;background:#0f172a;color:#e2e8f0;line-height:1.6}
-.ctr{max-width:1400px;margin:0 auto;padding:20px}.hdr{background:linear-gradient(135deg,#0c1929,#0c2918);border-radius:12px;padding:28px;margin-bottom:22px;border:1px solid #166534}
-.hdr h1{font-size:22px;color:#86efac}.hdr .sub{color:#94a3b8;font-size:13px}.meta{display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:12px;margin-top:16px}
+.ctr{max-width:1400px;margin:0 auto;padding:20px}.hdr{background:linear-gradient(135deg,#0c1929,#1a0c29);border-radius:12px;padding:28px;margin-bottom:22px;border:1px solid #4c1d95}
+.hdr h1{font-size:22px;color:#c4b5fd}.hdr .sub{color:#94a3b8;font-size:13px}.meta{display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:12px;margin-top:16px}
 .mi{background:#1e293b;padding:9px 13px;border-radius:7px;border:1px solid #334155}.mi .lb{font-size:10px;text-transform:uppercase;color:#64748b}.mi .vl{font-size:14px;color:#f1f5f9;font-weight:600}
 .dash{display:grid;grid-template-columns:repeat(auto-fit,minmax(110px,1fr));gap:10px;margin-bottom:22px}
 .sc{background:#1e293b;border-radius:9px;padding:16px;text-align:center;border:1px solid #334155}.sc .n{font-size:28px;font-weight:700}.sc .l{font-size:10px;color:#94a3b8;text-transform:uppercase}
@@ -816,14 +788,13 @@ td{padding:7px 9px;border-bottom:1px solid #1e293b;vertical-align:top}tr:hover t
 .ftr{text-align:center;padding:16px;color:#475569;font-size:10px}
 </style></head>
 <body><div class="ctr">
-<div class="hdr"><h1>Windows Security Build Review (Low-Priv)</h1>
-<div class="sub">13 Assessment Areas + CIS L$Script:Level | Standard User + Fallbacks</div>
+<div class="hdr"><h1>Windows Security Build Review (Admin)</h1>
+<div class="sub">13 Assessment Areas + CIS L$Script:Level Benchmark + POC Evidence</div>
 <div class="meta">
 <div class="mi"><div class="lb">Hostname</div><div class="vl">$Script:CN</div></div>
 <div class="mi"><div class="lb">OS</div><div class="vl">$Script:OS</div></div>
 <div class="mi"><div class="lb">Build</div><div class="vl">$Script:Build</div></div>
 <div class="mi"><div class="lb">User</div><div class="vl">$Script:User</div></div>
-<div class="mi"><div class="lb">Privilege</div><div class="vl" style="color:#fbbf24">$(if($Script:IsAdmin){'ADMIN'}else{'Standard'})</div></div>
 <div class="mi"><div class="lb">CIS Level</div><div class="vl" style="color:#c4b5fd">L$Script:Level</div></div>
 <div class="mi"><div class="lb">Date</div><div class="vl">$(Get-Date -Format 'dd MMM yyyy HH:mm')</div></div>
 <div class="mi"><div class="lb">Duration</div><div class="vl">$([math]::Round($dur.TotalSeconds,1))s</div></div>
@@ -860,13 +831,13 @@ td{padding:7px 9px;border-bottom:1px solid #1e293b;vertical-align:top}tr:hover t
             $html+="<tr><td><span class=`"b $stc`">$($fx.Status)</span></td><td><span class=`"$scc`">$($fx.Severity)</span></td>"
             $html+="<td>$cell</td><td>$(Safe-Html $fx.Expected)</td><td>$(Safe-Html $fx.Actual)</td></tr>`n"}
         $html+="</tbody></table></div></div>`n"}
-    $html+="<div class=`"ftr`"><p>LowPriv Build Review v5.0 | CIS L$Script:Level | $(Get-Date -Format 'dd MMM yyyy HH:mm:ss') | $([math]::Round($dur.TotalSeconds,1))s | $poc evidence | Authorised use only.</p></div></div></body></html>"
+    $html+="<div class=`"ftr`"><p>Admin Build Review v5.0 | CIS L$Script:Level | $(Get-Date -Format 'dd MMM yyyy HH:mm:ss') | $([math]::Round($dur.TotalSeconds,1))s | $poc evidence | Authorised use only.</p></div></div></body></html>"
     $html|Out-File -FilePath $rp -Encoding UTF8 -Force;return $rp
 }
 
 function Invoke-Review {
     Write-Host "============================================================" -ForegroundColor White
-    Write-Host "  Windows Security Build Review v5.0 (Low-Priv)" -ForegroundColor Magenta
+    Write-Host "  Windows Security Build Review v5.0 (Admin)" -ForegroundColor Magenta
     Write-Host "  13 Task Areas + CIS L$Script:Level + POC Evidence" -ForegroundColor Cyan
     Write-Host "  $Script:CN | $Script:User | $(Get-Date)" -ForegroundColor Gray
     Write-Host "============================================================" -ForegroundColor White
